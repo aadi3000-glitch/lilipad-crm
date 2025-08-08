@@ -1,21 +1,23 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { DndContext, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
-import { SortableContext, rectSortingStrategy, useSortable, arrayMove } from "@dnd-kit/sortable";
+import { SortableContext, rectSortingStrategy, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import confetti from "canvas-confetti";
 import { v4 as uuidv4 } from "uuid";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Checkbox } from "@/components/ui/checkbox";
-import { toast } from "sonner";
+import { Toaster, toast } from "sonner";
 
-const STORAGE_KEY = "lilipad_grants_crm_v1";
+// Firebase Auth
+import { initializeApp } from "firebase/app";
+import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "firebase/auth";
+
+const firebaseConfig = {
+  apiKey: process.env.REACT_APP_FIREBASE_API_KEY || "AIzaSyBaRd3ocStvSqzHec4MHgz5IFPdetRhtCs",
+  authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN || "lilipad-crm.firebaseapp.com",
+  projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID || "lilipad-crm",
+  appId: process.env.REACT_APP_FIREBASE_APP_ID || "1:341975896867:web:eb092407b35dd580333296",
+};
+let app, auth;
+try { app = initializeApp(firebaseConfig); auth = getAuth(app); } catch {}
 
 const STAGES = [
   { id: "research", label: "Research" },
@@ -23,6 +25,8 @@ const STAGES = [
   { id: "won", label: "Closed – Won" },
   { id: "lost", label: "Closed – Lost" },
 ];
+
+const STORAGE_KEY = "lilipad_grants_crm_v1";
 
 const emptyGrant = () => ({
   id: uuidv4(),
@@ -57,121 +61,110 @@ const defaultTemplates = [
   },
 ];
 
+// ---- tiny UI helpers (no external UI lib) ----
+const Btn = ({ children, onClick, kind = "default", disabled, style }) => (
+  <button
+    onClick={onClick}
+    disabled={disabled}
+    style={{
+      padding: "8px 12px",
+      borderRadius: 10,
+      border: "1px solid #cbd5e1",
+      background: disabled ? "#e2e8f0" : kind === "primary" ? "#0f172a" : "#fff",
+      color: disabled ? "#94a3b8" : kind === "primary" ? "#fff" : "#0f172a",
+      cursor: disabled ? "not-allowed" : "pointer",
+      ...style,
+    }}
+  >
+    {children}
+  </button>
+);
+const Input = (p) => <input {...p} style={{ width: "100%", padding: 8, border: "1px solid #cbd5e1", borderRadius: 10 }} />;
+const Textarea = (p) => <textarea {...p} style={{ width: "100%", padding: 8, border: "1px solid #cbd5e1", borderRadius: 10 }} />;
+const Card = ({ children }) => <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 1px 2px rgba(0,0,0,.05)" }}>{children}</div>;
+const CardHeader = ({ children }) => <div style={{ padding: 16, borderBottom: "1px solid #e5e7eb" }}>{children}</div>;
+const CardTitle = ({ children }) => <div style={{ fontWeight: 600 }}>{children}</div>;
+const CardContent = ({ children }) => <div style={{ padding: 24 }}>{children}</div>;
+const Badge = ({ children }) => <span style={{ border: "1px solid #cbd5e1", borderRadius: 999, padding: "2px 8px", fontSize: 12, background: "#f8fafc" }}>{children}</span>;
+// ------------------------------------------------
+
 function useLocalState(key, initial) {
-  const [state, setState] = useState(() => {
-    try {
-      const raw = localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : initial;
-    } catch (e) {
-      return initial;
-    }
+  const [s, setS] = useState(() => {
+    try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : initial; } catch { return initial; }
   });
-  useEffect(() => {
-    try {
-      localStorage.setItem(key, JSON.stringify(state));
-    } catch {}
-  }, [key, state]);
-  return [state, setState];
+  useEffect(() => { try { localStorage.setItem(key, JSON.stringify(s)); } catch {} }, [key, s]);
+  return [s, setS];
 }
 
-function mergeTemplate(tpl, grant) {
-  const firstName = (grant.contactName || "").split(" ")[0] || "there";
+function mergeTemplate(tpl, g) {
+  const firstName = (g.contactName || "").split(" ")[0] || "there";
   const map = {
     "{FirstName}": firstName,
-    "{Grant}": grant.grantName || "your grant",
-    "{Funder}": grant.funder || "your foundation",
-    "{Sector}": grant.sector || "education",
-    "{Amount}": grant.amount || "requested support",
-    "{Region}": grant.region || "our regions",
+    "{Grant}": g.grantName || "your grant",
+    "{Funder}": g.funder || "your foundation",
+    "{Sector}": g.sector || "education",
+    "{Amount}": g.amount || "requested support",
+    "{Region}": g.region || "our regions",
   };
-  let subject = tpl.subject;
-  let body = tpl.body;
-  Object.entries(map).forEach(([k, v]) => {
-    subject = subject.replaceAll(k, v);
-    body = body.replaceAll(k, v);
-  });
+  let subject = tpl.subject, body = tpl.body;
+  Object.entries(map).forEach(([k, v]) => { subject = subject.split(k).join(v); body = body.split(k).join(v); });
   return { subject, body };
 }
 
 function StageBadge({ stage }) {
-  const label = STAGES.find((s) => s.id === stage)?.label || stage;
-  const tone =
-    stage === "research" ? "secondary" : stage === "pipeline" ? "default" : stage === "won" ? "success" : "destructive";
-  return <Badge variant={tone}>{label}</Badge>;
+  const label = STAGES.find(s => s.id === stage)?.label || stage;
+  return <Badge>{label}</Badge>;
 }
 
 function GrantRow({ g, selected, onToggle }) {
   return (
-    <div className="grid grid-cols-12 gap-2 items-center py-2 border-b">
-      <div className="col-span-1 flex items-center gap-2">
-        <Checkbox checked={selected} onCheckedChange={() => onToggle(g.id)} />
+    <div style={{ display: "grid", gridTemplateColumns: "60px 1.5fr 1fr 1fr 1fr 100px", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #e5e7eb" }}>
+      <div><input type="checkbox" checked={!!selected} onChange={() => onToggle(g.id)} /></div>
+      <div>
+        <div style={{ fontWeight: 600 }}>{g.grantName || "—"}</div>
+        <a href={g.website || "#"} target="_blank" rel="noreferrer" style={{ color: "#64748b", fontSize: 12, textDecoration: "underline" }}>{g.funder || g.website || ""}</a>
       </div>
-      <div className="col-span-3">
-        <div className="font-medium">{g.grantName || "—"}</div>
-        <a href={g.website || "#"} target="_blank" className="text-xs underline text-muted-foreground">
-          {g.funder || g.website || ""}
-        </a>
-      </div>
-      <div className="col-span-2 text-sm">{g.deadline || "—"}</div>
-      <div className="col-span-2 text-sm">{g.region || "—"}</div>
-      <div className="col-span-2 text-sm">{g.contactName || "—"}</div>
-      <div className="col-span-2 flex justify-end"><StageBadge stage={g.stage} /></div>
+      <div style={{ color: "#64748b", fontSize: 13 }}>{g.deadline || "—"}</div>
+      <div style={{ color: "#64748b", fontSize: 13 }}>{g.region || "—"}</div>
+      <div style={{ color: "#64748b", fontSize: 13 }}>{g.contactName || "—"}</div>
+      <div style={{ textAlign: "right" }}><StageBadge stage={g.stage} /></div>
     </div>
   );
 }
 
 function EmailComposer({ grant, templates, onSent }) {
   const [tplId, setTplId] = useState(templates[0]?.id || "");
-  const chosen = templates.find((t) => t.id === tplId) || templates[0];
+  const chosen = templates.find(t => t.id === tplId) || templates[0];
   const merged = useMemo(() => mergeTemplate(chosen, grant), [chosen, grant]);
   const [subject, setSubject] = useState(merged.subject);
   const [body, setBody] = useState(merged.body);
+  useEffect(() => { setSubject(merged.subject); setBody(merged.body); }, [merged.subject, merged.body]);
 
-  useEffect(() => {
-    setSubject(merged.subject);
-    setBody(merged.body);
-  }, [merged.subject, merged.body]);
-
-  function handleSend() {
-    if (!grant.contactEmail) {
-      toast.error("No contact email on this grant.");
-      return;
-    }
-    const mailto = `mailto:${encodeURIComponent(grant.contactEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-    window.location.href = mailto;
-    onSent?.();
+  function handleSendGmail() {
+    if (!grant.contactEmail) { toast.error("No contact email on this grant."); return; }
+    const url = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(grant.contactEmail)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    window.open(url, "_blank"); onSent?.();
   }
 
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-3">
+    <div style={{ display: "grid", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <div>
-          <label className="text-xs text-muted-foreground">Template</label>
-          <Select value={tplId} onValueChange={setTplId}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {templates.map((t) => (
-                <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div style={{ fontSize: 12, color: "#64748b" }}>Template</div>
+          <select value={tplId} onChange={e => setTplId(e.target.value)} style={{ width: "100%", padding: 8, border: "1px solid #cbd5e1", borderRadius: 10 }}>
+            {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
         </div>
         <div>
-          <label className="text-xs text-muted-foreground">To</label>
+          <div style={{ fontSize: 12, color: "#64748b" }}>To</div>
           <Input value={grant.contactEmail || ""} readOnly />
         </div>
       </div>
-      <div>
-        <label className="text-xs text-muted-foreground">Subject</label>
-        <Input value={subject} onChange={(e) => setSubject(e.target.value)} />
-      </div>
-      <div>
-        <label className="text-xs text-muted-foreground">Body</label>
-        <Textarea rows={10} value={body} onChange={(e) => setBody(e.target.value)} />
-      </div>
-      <div className="flex justify-end gap-2">
-        <Button variant="secondary" onClick={() => navigator.clipboard.writeText(body)}>Copy Body</Button>
-        <Button onClick={handleSend}>Send Email</Button>
+      <div><div style={{ fontSize: 12, color: "#64748b" }}>Subject</div><Input value={subject} onChange={e => setSubject(e.target.value)} /></div>
+      <div><div style={{ fontSize: 12, color: "#64748b" }}>Body</div><Textarea rows={10} value={body} onChange={e => setBody(e.target.value)} /></div>
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <Btn onClick={() => navigator.clipboard.writeText(body)}>Copy Body</Btn>
+        <Btn onClick={handleSendGmail} kind="primary">Open in Gmail</Btn>
       </div>
     </div>
   );
@@ -179,62 +172,38 @@ function EmailComposer({ grant, templates, onSent }) {
 
 function SortableCard({ grant, onEdit, onDelete }) {
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: grant.id });
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-  };
+  const style = { transform: CSS.Transform.toString(transform), transition };
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners} className="rounded-2xl border p-3 bg-card shadow-sm">
-      <div className="flex items-start justify-between">
+    <div ref={setNodeRef} style={{ ...style, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 16, padding: 12, boxShadow: "0 1px 2px rgba(0,0,0,.05)" }} {...attributes} {...listeners}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
         <div>
-          <div className="font-semibold leading-tight">{grant.grantName || "Untitled grant"}</div>
-          <div className="text-xs text-muted-foreground">{grant.funder}</div>
+          <div style={{ fontWeight: 600 }}>{grant.grantName || "Untitled grant"}</div>
+          <div style={{ color: "#64748b", fontSize: 12 }}>{grant.funder}</div>
         </div>
-        <div className="flex gap-2">
-          <Button size="sm" variant="outline" onClick={() => onEdit(grant)}>Edit</Button>
-          <Button size="sm" variant="ghost" onClick={() => onDelete(grant.id)}>Delete</Button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn onClick={() => onEdit(grant)}>Edit</Btn>
+          <Btn onClick={() => onDelete(grant.id)}>Delete</Btn>
         </div>
       </div>
-      <div className="mt-2 text-sm">
+      <div style={{ marginTop: 8, fontSize: 14 }}>
         <div>Deadline: {grant.deadline || "—"}</div>
         <div>Contact: {grant.contactName || "—"} ({grant.contactEmail || "—"})</div>
       </div>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {grant.region && <Badge variant="secondary">{grant.region}</Badge>}
-        {grant.sector && <Badge variant="secondary">{grant.sector}</Badge>}
-        {grant.amount && <Badge variant="secondary">{grant.amount}</Badge>}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+        {grant.region && <Badge>{grant.region}</Badge>}
+        {grant.sector && <Badge>{grant.sector}</Badge>}
+        {grant.amount && <Badge>{grant.amount}</Badge>}
       </div>
     </div>
   );
 }
 
-export default function App() {
+function AppInner() {
   const [grants, setGrants] = useLocalState(STORAGE_KEY, {
     items: [
-      {
-        ...emptyGrant(),
-        grantName: "Education Equity Fund 2025",
-        funder: "Acme Foundation",
-        website: "https://example.org/grants/eef",
-        deadline: "2025-10-01",
-        region: "Germany / Morocco",
-        amount: "€50k",
-        contactName: "Jane Doe",
-        contactEmail: "jane@example.org",
-        notes: "Focus on literacy; good alignment.",
-      },
-      {
-        ...emptyGrant(),
-        grantName: "Children First Microgrants",
-        funder: "Bright Futures Trust",
-        website: "https://example.org/grants/cfm",
-        deadline: "2025-09-15",
-        region: "EU",
-        amount: "€10–25k",
-        contactName: "Marc Dupont",
-        contactEmail: "marc@example.org",
-        stage: "pipeline",
-      },
+      { ...emptyGrant(), grantName: "Amazon – Meet & Code", funder: "Amazon / Meet & Code", website: "https://meet-and-code.org/", region: "Europe" },
+      { ...emptyGrant(), grantName: "SAP Corporate Giving", funder: "SAP", region: "Germany", website: "https://www.sap.com/" },
+      // …(list trimmed; keep all your seed items here)…
     ],
     templates: defaultTemplates,
   });
@@ -247,280 +216,208 @@ export default function App() {
 
   const itemsByStage = useMemo(() => {
     const by = { research: [], pipeline: [], won: [], lost: [] };
-    (grants.items || []).forEach((g) => by[g.stage || "research"].push(g));
+    (grants.items || []).forEach(g => by[g.stage || "research"].push(g));
     return by;
   }, [grants.items]);
 
   function addGrant() {
-    if (!newGrant.grantName) {
-      toast.error("Please add a grant name");
-      return;
-    }
-    setGrants((prev) => ({ ...prev, items: [ { ...newGrant }, ...prev.items ] }));
+    if (!newGrant.grantName) { toast.error("Please add a grant name"); return; }
+    setGrants(prev => ({ ...prev, items: [{ ...newGrant }, ...prev.items] }));
     setNewGrant(emptyGrant());
     toast.success("Grant added to Research");
   }
-
   function updateGrant(id, patch) {
-    setGrants((prev) => ({
-      ...prev,
-      items: prev.items.map((g) => (g.id === id ? { ...g, ...patch, lastActivity: new Date().toISOString() } : g)),
-    }));
+    setGrants(prev => ({ ...prev, items: prev.items.map(g => (g.id === id ? { ...g, ...patch, lastActivity: new Date().toISOString() } : g)) }));
   }
-
-  function deleteGrant(id) {
-    setGrants((prev) => ({ ...prev, items: prev.items.filter((g) => g.id !== id) }));
-  }
-
-  function toggleSelect(id) {
-    setSelectedIds((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
-  }
-
+  function deleteGrant(id) { setGrants(prev => ({ ...prev, items: prev.items.filter(g => g.id !== id) })); }
+  function toggleSelect(id) { setSelectedIds(s => (s.includes(id) ? s.filter(x => x !== id) : [...s, id])); }
   function bulkMoveToPipeline() {
     if (selectedIds.length === 0) return;
-    setGrants((prev) => ({
-      ...prev,
-      items: prev.items.map((g) => (selectedIds.includes(g.id) ? { ...g, stage: "pipeline" } : g)),
-    }));
-    setSelectedIds([]);
-    setActiveTab("pipeline");
-    toast("Moved to Pipeline");
+    setGrants(prev => ({ ...prev, items: prev.items.map(g => (selectedIds.includes(g.id) ? { ...g, stage: "pipeline" } : g)) }));
+    setSelectedIds([]); setActiveTab("pipeline"); toast("Moved to Pipeline");
   }
-
   function handleDragEnd(event) {
-    const { active, over } = event;
-    if (!over) return;
-
-    const sourceId = active.id;
+    const { active, over } = event; if (!over) return;
+    const grant = grants.items.find(i => i.id === active.id); if (!grant) return;
     const targetCol = over.id;
-    const grant = grants.items.find((i) => i.id === sourceId);
-
-    if (STAGES.some((s) => s.id === targetCol)) {
-      // Move across columns
-      if (grant.stage !== targetCol) {
-        updateGrant(grant.id, { stage: targetCol });
-        if (targetCol === "won") {
-          confetti({ particleCount: 120, spread: 70, origin: { y: 0.2 } });
-          toast.success("Marked as WON! 🎉");
-        }
-      }
-      return;
+    if (STAGES.some(s => s.id === targetCol) && grant.stage !== targetCol) {
+      updateGrant(grant.id, { stage: targetCol });
+      if (targetCol === "won") { confetti({ particleCount: 120, spread: 70, origin: { y: 0.2 } }); toast.success("Marked as WON! 🎉"); }
     }
   }
 
-  function KanbanColumn({ id, label, children }) {
-    return (
-      <div className="flex-1 min-w-[260px] bg-muted/30 rounded-2xl p-3">
-        <div className="flex items-center justify-between mb-2">
-          <div className="font-semibold">{label}</div>
-          <Badge variant="secondary">{children?.length || 0}</Badge>
-        </div>
-        <div id={id} className="space-y-3">
-          <SortableContext items={(children || []).map((c) => c.key)} strategy={rectSortingStrategy}>
-            {children}
-          </SortableContext>
-        </div>
+  const header = (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div>
+        <h1 style={{ margin: 0 }}>LiliPad Library — Grants CRM</h1>
+        <div style={{ color: "#64748b", fontSize: 14 }}>Research → Pipeline → Closed. Draft outreach and celebrate wins.</div>
       </div>
-    );
-  }
+      <Btn onClick={() => { localStorage.removeItem(STORAGE_KEY); window.location.reload(); }}>Reset Demo Data</Btn>
+    </div>
+  );
 
   return (
-    <div className="p-5 md:p-8 space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">LiliPad Library — Grants CRM</h1>
-          <p className="text-sm text-muted-foreground">Research → Pipeline → Closed. Draft outreach, send emails, and celebrate wins.</p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={() => {
-            localStorage.removeItem(STORAGE_KEY);
-            window.location.reload();
-          }}>Reset Demo Data</Button>
-        </div>
+    <div style={{ padding: 24, maxWidth: 1100, margin: "0 auto" }}>
+      <Toaster richColors />
+      {header}
+
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 8, marginTop: 16, marginBottom: 12 }}>
+        {["research", "pipeline", "kanban", "settings"].map(t => (
+          <Btn key={t} onClick={() => setActiveTab(t)} kind={activeTab === t ? "primary" : "default"}>{t[0].toUpperCase() + t.slice(1)}</Btn>
+        ))}
       </div>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid grid-cols-4 w-full md:w-auto">
-          <TabsTrigger value="research">Research</TabsTrigger>
-          <TabsTrigger value="pipeline">Pipeline</TabsTrigger>
-          <TabsTrigger value="kanban">Kanban</TabsTrigger>
-          <TabsTrigger value="settings">Templates & Settings</TabsTrigger>
-        </TabsList>
-
-        {/* Research Tab */}
-        <TabsContent value="research" className="space-y-4">
+      {/* Research */}
+      {activeTab === "research" && (
+        <div className="space" style={{ display: "grid", gap: 16 }}>
           <Card>
-            <CardHeader>
-              <CardTitle>Add to Long List</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="grid md:grid-cols-2 gap-3">
-                <Input placeholder="Grant name" value={newGrant.grantName} onChange={(e) => setNewGrant({ ...newGrant, grantName: e.target.value })} />
-                <Input placeholder="Funder" value={newGrant.funder} onChange={(e) => setNewGrant({ ...newGrant, funder: e.target.value })} />
-                <Input placeholder="Website (https://)" value={newGrant.website} onChange={(e) => setNewGrant({ ...newGrant, website: e.target.value })} />
-                <Input placeholder="Deadline (YYYY-MM-DD)" value={newGrant.deadline} onChange={(e) => setNewGrant({ ...newGrant, deadline: e.target.value })} />
-                <Input placeholder="Region/Country" value={newGrant.region} onChange={(e) => setNewGrant({ ...newGrant, region: e.target.value })} />
-                <Input placeholder="Sector" value={newGrant.sector} onChange={(e) => setNewGrant({ ...newGrant, sector: e.target.value })} />
-                <Input placeholder="Amount (e.g., €25k)" value={newGrant.amount} onChange={(e) => setNewGrant({ ...newGrant, amount: e.target.value })} />
-                <Input placeholder="Contact name" value={newGrant.contactName} onChange={(e) => setNewGrant({ ...newGrant, contactName: e.target.value })} />
-                <Input placeholder="Contact email" value={newGrant.contactEmail} onChange={(e) => setNewGrant({ ...newGrant, contactEmail: e.target.value })} />
+            <CardHeader><CardTitle>Add to Long List</CardTitle></CardHeader>
+            <CardContent>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <Input placeholder="Grant name" value={newGrant.grantName} onChange={e => setNewGrant({ ...newGrant, grantName: e.target.value })} />
+                <Input placeholder="Funder" value={newGrant.funder} onChange={e => setNewGrant({ ...newGrant, funder: e.target.value })} />
+                <Input placeholder="Website (https://)" value={newGrant.website} onChange={e => setNewGrant({ ...newGrant, website: e.target.value })} />
+                <Input placeholder="Deadline (YYYY-MM-DD)" value={newGrant.deadline} onChange={e => setNewGrant({ ...newGrant, deadline: e.target.value })} />
+                <Input placeholder="Region/Country" value={newGrant.region} onChange={e => setNewGrant({ ...newGrant, region: e.target.value })} />
+                <Input placeholder="Sector" value={newGrant.sector} onChange={e => setNewGrant({ ...newGrant, sector: e.target.value })} />
+                <Input placeholder="Amount (e.g., €25k)" value={newGrant.amount} onChange={e => setNewGrant({ ...newGrant, amount: e.target.value })} />
+                <Input placeholder="Contact name" value={newGrant.contactName} onChange={e => setNewGrant({ ...newGrant, contactName: e.target.value })} />
+                <Input placeholder="Contact email" value={newGrant.contactEmail} onChange={e => setNewGrant({ ...newGrant, contactEmail: e.target.value })} />
               </div>
-              <Textarea placeholder="Notes" value={newGrant.notes} onChange={(e) => setNewGrant({ ...newGrant, notes: e.target.value })} />
-              <div className="flex justify-end"><Button onClick={addGrant}>Add to Research</Button></div>
+              <div style={{ marginTop: 12 }}><Textarea placeholder="Notes" value={newGrant.notes} onChange={e => setNewGrant({ ...newGrant, notes: e.target.value })} /></div>
+              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}><Btn kind="primary" onClick={addGrant}>Add to Research</Btn></div>
             </CardContent>
           </Card>
 
           <Card>
-            <CardHeader className="flex-row items-center justify-between">
-              <CardTitle>Long List</CardTitle>
-              <div className="flex gap-2">
-                <Button variant="secondary" onClick={bulkMoveToPipeline} disabled={selectedIds.length === 0}>Move selected to Pipeline</Button>
+            <CardHeader>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <CardTitle>Long List</CardTitle>
+                <Btn onClick={bulkMoveToPipeline} disabled={selectedIds.length === 0}>Move selected to Pipeline</Btn>
               </div>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-12 gap-2 text-xs font-medium text-muted-foreground border-b pb-2">
-                <div className="col-span-1">Select</div>
-                <div className="col-span-3">Grant / Funder</div>
-                <div className="col-span-2">Deadline</div>
-                <div className="col-span-2">Region</div>
-                <div className="col-span-2">Contact</div>
-                <div className="col-span-2 text-right">Stage</div>
+              <div style={{ display: "grid", gridTemplateColumns: "60px 1.5fr 1fr 1fr 1fr 100px", fontWeight: 600, borderBottom: "1px solid #e5e7eb", paddingBottom: 6 }}>
+                <div>Select</div><div>Grant / Funder</div><div>Deadline</div><div>Region</div><div>Contact</div><div style={{ textAlign: "right" }}>Stage</div>
               </div>
               {(grants.items || [])
-                .filter((g) => g.stage === "research")
-                .sort((a, b) => (a.deadline || '').localeCompare(b.deadline || ''))
-                .map((g) => (
+                .filter(g => g.stage === "research")
+                .sort((a, b) => (a.deadline || "").localeCompare(b.deadline || ""))
+                .map(g => (
                   <GrantRow key={g.id} g={g} selected={selectedIds.includes(g.id)} onToggle={toggleSelect} />
                 ))}
             </CardContent>
           </Card>
-        </TabsContent>
+        </div>
+      )}
 
-        {/* Pipeline Tab */}
-        <TabsContent value="pipeline" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Qualified Pipeline</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {(grants.items || []).filter((g) => g.stage === "pipeline").map((g) => (
-                <div key={g.id} className="border rounded-2xl p-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="font-semibold">{g.grantName}</div>
-                      <div className="text-xs text-muted-foreground">{g.funder} • Deadline {g.deadline || '—'}</div>
-                    </div>
-                    <div className="flex gap-2">
-                      <Dialog>
-                        <DialogTrigger asChild>
-                          <Button size="sm">Draft Email</Button>
-                        </DialogTrigger>
-                        <DialogContent className="max-w-2xl">
-                          <DialogHeader>
-                            <DialogTitle>Email to {g.contactName || 'Contact'}</DialogTitle>
-                          </DialogHeader>
-                          <EmailComposer
-                            grant={g}
-                            templates={grants.templates}
-                            onSent={() => updateGrant(g.id, { lastActivity: new Date().toISOString() })}
-                          />
-                          <DialogFooter></DialogFooter>
-                        </DialogContent>
-                      </Dialog>
-                      <Select value={g.stage} onValueChange={(v) => updateGrant(g.id, { stage: v })}>
-                        <SelectTrigger className="w-[160px]"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {STAGES.map((s) => (<SelectItem key={s.id} value={s.id}>{s.label}</SelectItem>))}
-                        </SelectContent>
-                      </Select>
-                    </div>
+      {/* Pipeline */}
+      {activeTab === "pipeline" && (
+        <Card>
+          <CardHeader><CardTitle>Qualified Pipeline</CardTitle></CardHeader>
+          <CardContent>
+            {(grants.items || []).filter(g => g.stage === "pipeline").map(g => (
+              <div key={g.id} style={{ border: "1px solid #e5e7eb", borderRadius: 16, padding: 12, marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{g.grantName}</div>
+                    <div style={{ color: "#64748b", fontSize: 12 }}>{g.funder} • Deadline {g.deadline || "—"}</div>
                   </div>
-                  {g.notes && <p className="mt-2 text-sm">{g.notes}</p>}
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Kanban Tab */}
-        <TabsContent value="kanban" className="space-y-4">
-          <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-            <div className="grid md:flex gap-4">
-              {STAGES.map((col) => (
-                <KanbanColumn key={col.id} id={col.id} label={col.label}>
-                  {itemsByStage[col.id].map((g) => (
-                    <SortableCard
-                      key={g.id}
-                      grant={g}
-                      onEdit={(grant) => setEditing(grant)}
-                      onDelete={deleteGrant}
-                    />
-                  ))}
-                </KanbanColumn>
-              ))}
-            </div>
-          </DndContext>
-        </TabsContent>
-
-        {/* Templates & Settings */}
-        <TabsContent value="settings" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Email Templates</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {(grants.templates || []).map((t) => (
-                <div key={t.id} className="border rounded-2xl p-3 space-y-2">
-                  <div className="grid md:grid-cols-2 gap-2">
-                    <Input value={t.name} onChange={(e) => setGrants((p) => ({ ...p, templates: p.templates.map((x) => x.id === t.id ? { ...x, name: e.target.value } : x) }))} />
-                    <Input value={t.subject} onChange={(e) => setGrants((p) => ({ ...p, templates: p.templates.map((x) => x.id === t.id ? { ...x, subject: e.target.value } : x) }))} />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <Btn onClick={() => window.prompt("Copy this email address:", g.contactEmail || "")}>View Contact</Btn>
+                    <select value={g.stage} onChange={e => updateGrant(g.id, { stage: e.target.value })}>
+                      {STAGES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                    </select>
                   </div>
-                  <Textarea rows={6} value={t.body} onChange={(e) => setGrants((p) => ({ ...p, templates: p.templates.map((x) => x.id === t.id ? { ...x, body: e.target.value } : x) }))} />
-                  <div className="text-xs text-muted-foreground">Supported placeholders: {"{FirstName}"}, {"{Grant}"}, {"{Funder}"}, {"{Sector}"}, {"{Amount}"}, {"{Region}"}</div>
                 </div>
-              ))}
-              <Button onClick={() => setGrants((p) => ({ ...p, templates: [...p.templates, { id: uuidv4(), name: "New template", subject: "Subject", body: "Body" }] }))}>Add Template</Button>
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
-
-      {/* Edit drawer (simple dialog) */}
-      <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Edit grant</DialogTitle>
-          </DialogHeader>
-          {editing && (
-            <div className="space-y-3">
-              <div className="grid md:grid-cols-2 gap-3">
-                <Input value={editing.grantName} onChange={(e) => setEditing({ ...editing, grantName: e.target.value })} />
-                <Input value={editing.funder} onChange={(e) => setEditing({ ...editing, funder: e.target.value })} />
-                <Input value={editing.website} onChange={(e) => setEditing({ ...editing, website: e.target.value })} />
-                <Input value={editing.deadline} onChange={(e) => setEditing({ ...editing, deadline: e.target.value })} />
-                <Input value={editing.region} onChange={(e) => setEditing({ ...editing, region: e.target.value })} />
-                <Input value={editing.sector} onChange={(e) => setEditing({ ...editing, sector: e.target.value })} />
-                <Input value={editing.amount} onChange={(e) => setEditing({ ...editing, amount: e.target.value })} />
-                <Input value={editing.contactName} onChange={(e) => setEditing({ ...editing, contactName: e.target.value })} />
-                <Input value={editing.contactEmail} onChange={(e) => setEditing({ ...editing, contactEmail: e.target.value })} />
+                {g.contactEmail && (
+                  <div style={{ marginTop: 8 }}>
+                    <EmailComposer grant={g} templates={grants.templates} onSent={() => updateGrant(g.id, { lastActivity: new Date().toISOString() })} />
+                  </div>
+                )}
               </div>
-              <Textarea rows={6} value={editing.notes} onChange={(e) => setEditing({ ...editing, notes: e.target.value })} />
-              <div className="flex items-center justify-between">
-                <Select value={editing.stage} onValueChange={(v) => setEditing({ ...editing, stage: v })}>
-                  <SelectTrigger className="w-[200px]"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {STAGES.map((s) => (<SelectItem key={s.id} value={s.id}>{s.label}</SelectItem>))}
-                  </SelectContent>
-                </Select>
-                <div className="flex gap-2">
-                  <Button variant="destructive" onClick={() => { deleteGrant(editing.id); setEditing(null); }}>Delete</Button>
-                  <Button onClick={() => { updateGrant(editing.id, editing); if (editing.stage === "won") { confetti({ particleCount: 120, spread: 70, origin: { y: 0.2 } }); } setEditing(null); }}>Save</Button>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Kanban */}
+      {activeTab === "kanban" && (
+        <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+          <div style={{ display: "flex", gap: 12 }}>
+            {STAGES.map(col => (
+              <div key={col.id} id={col.id} style={{ flex: 1, minWidth: 260, background: "#f1f5f9", borderRadius: 16, padding: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div style={{ fontWeight: 600 }}>{col.label}</div>
+                  <Badge>{itemsByStage[col.id]?.length || 0}</Badge>
+                </div>
+                <SortableContext items={(itemsByStage[col.id] || []).map(g => g.id)} strategy={rectSortingStrategy}>
+                  <div style={{ display: "grid", gap: 12, marginTop: 8 }}>
+                    {(itemsByStage[col.id] || []).map(g => (
+                      <SortableCard key={g.id} grant={g} onEdit={setEditing} onDelete={deleteGrant} />
+                    ))}
+                  </div>
+                </SortableContext>
+              </div>
+            ))}
+          </div>
+        </DndContext>
+      )}
+
+      {/* Settings (email templates) */}
+      {activeTab === "settings" && (
+        <Card>
+          <CardHeader><CardTitle>Email Templates</CardTitle></CardHeader>
+          <CardContent>
+            {(grants.templates || []).map(t => (
+              <div key={t.id} style={{ border: "1px solid #e5e7eb", borderRadius: 16, padding: 12, marginBottom: 12 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <Input value={t.name} onChange={e => setGrants(p => ({ ...p, templates: p.templates.map(x => x.id === t.id ? { ...x, name: e.target.value } : x) }))} />
+                  <Input value={t.subject} onChange={e => setGrants(p => ({ ...p, templates: p.templates.map(x => x.id === t.id ? { ...x, subject: e.target.value } : x) }))} />
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <Textarea rows={6} value={t.body} onChange={e => setGrants(p => ({ ...p, templates: p.templates.map(x => x.id === t.id ? { ...x, body: e.target.value } : x) }))} />
+                </div>
+                <div style={{ fontSize: 12, color: "#64748b", marginTop: 6 }}>
+                  Placeholders: {"{FirstName}"}, {"{Grant}"}, {"{Funder}"}, {"{Sector}"}, {"{Amount}"}, {"{Region}"}
                 </div>
               </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
+            ))}
+            <Btn onClick={() => setGrants(p => ({ ...p, templates: [...p.templates, { id: uuidv4(), name: "New template", subject: "Subject", body: "Body" }] }))}>Add Template</Btn>
+          </CardContent>
+        </Card>
+      )}
     </div>
+  );
+}
+
+function AuthGate({ children }) {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    if (!auth) return;
+    const unsub = onAuthStateChanged(auth, (u) => {
+      if (u?.email?.endsWith("@lilipadlibrary.org")) setUser(u);
+      else { if (u?.email) toast.error("Access restricted to @lilipadlibrary.org"); setUser(null); signOut(auth); }
+      setLoading(false);
+    });
+    return () => unsub();
+  }, []);
+  const login = async () => { try { await signInWithPopup(auth, new GoogleAuthProvider()); } catch { toast.error("Login failed"); } };
+  if (loading) return <div style={{ padding: 24 }}>Loading…</div>;
+  if (!user) return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <Card><CardHeader><CardTitle>LiliPad Grants CRM</CardTitle></CardHeader><CardContent><Btn kind="primary" onClick={login}>Continue with Google</Btn></CardContent></Card>
+    </div>
+  );
+  return <>{children}</>;
+}
+
+export default function App() {
+  return (
+    <AuthGate>
+      <AppInner />
+    </AuthGate>
   );
 }
